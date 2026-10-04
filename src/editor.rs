@@ -18,12 +18,13 @@ use crate::{
     buffer::{Buffer, Pos, byte_idx},
     clipboard::Clipboard,
     config::Config,
+    help,
     highlight::{self, Highlighter, Kind},
     history::History,
 };
 
-const HINT: &str = "Ctrl+S save · Ctrl+Q quit · Ctrl+F find · Ctrl+H replace";
-const CONFIRM: &str = "Replace? y = yes · n = skip · a = all · Esc = stop";
+const SCROLL_HELP: usize = 3;
+const CONFIRM: &str = "Replace?  y yes · n skip · a all · Esc stop";
 
 #[derive(Clone, Copy)]
 enum PromptKind {
@@ -76,6 +77,8 @@ pub struct Editor {
     replacement: String,
     /// Asking whether to replace the selected match.
     confirm: bool,
+    /// The shortcuts panel is open, scrolled by this many lines.
+    help: Option<usize>,
     message: Option<String>,
     quit_armed: bool,
     quit: bool,
@@ -114,6 +117,7 @@ impl Editor {
             search: String::new(),
             replacement: String::new(),
             confirm: false,
+            help: None,
             message,
             quit_armed: false,
             quit: false,
@@ -136,6 +140,9 @@ impl Editor {
     // ---- Input ----
 
     fn on_key(&mut self, key: KeyEvent) {
+        if self.help.is_some() {
+            return self.on_help_key(key);
+        }
         if self.prompt.is_some() {
             return self.on_prompt_key(key);
         }
@@ -187,6 +194,7 @@ impl Editor {
             KeyCode::Backspace => self.backspace(),
             KeyCode::Delete => self.delete_forward(),
             KeyCode::Esc => self.anchor = None,
+            KeyCode::F(1) => self.help = Some(0),
             KeyCode::F(3) => {
                 self.find_next();
             }
@@ -236,6 +244,21 @@ impl Editor {
         }
     }
 
+    fn on_help_key(&mut self, key: KeyEvent) {
+        let Some(scroll) = &mut self.help else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up => *scroll = scroll.saturating_sub(1),
+            KeyCode::Down => *scroll += 1,
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+            KeyCode::PageDown => *scroll += 10,
+            KeyCode::Home => *scroll = 0,
+            KeyCode::End => *scroll = usize::MAX,
+            _ => self.help = None,
+        }
+    }
+
     fn on_confirm_key(&mut self, key: KeyEvent) {
         self.message = None;
         match key.code {
@@ -257,6 +280,15 @@ impl Editor {
     }
 
     fn on_mouse(&mut self, mouse: MouseEvent) {
+        if let Some(scroll) = &mut self.help {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(SCROLL_HELP),
+                MouseEventKind::ScrollDown => *scroll += SCROLL_HELP,
+                MouseEventKind::Down(_) => self.help = None,
+                _ => {}
+            }
+            return;
+        }
         let area = self.text_area;
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -807,8 +839,11 @@ impl Editor {
 
         self.draw_status(frame, status_area);
 
-        if let Some((kind, input)) = &self.prompt {
-            let x = kind.label().width() + input.width();
+        if let Some(scroll) = &mut self.help {
+            let c = &self.config.colors;
+            help::draw(frame, frame.area(), scroll, c.keyword, c.line_number);
+        } else if let Some((kind, input)) = &self.prompt {
+            let x = 1 + kind.label().width() + input.width();
             frame.set_cursor_position(Position::new(status_area.x + x as u16, status_area.y));
         } else if (self.scroll..self.scroll + height).contains(&self.cursor.line)
             && (self.hscroll..self.hscroll + width).contains(&cursor_col)
@@ -874,32 +909,50 @@ impl Editor {
     }
 
     fn draw_status(&self, frame: &mut Frame, area: Rect) {
-        let style = Style::new().add_modifier(Modifier::REVERSED);
-        if let Some((kind, input)) = &self.prompt {
-            let text = format!("{}{input}", kind.label());
-            frame.render_widget(Paragraph::new(text).style(style), area);
-            return;
-        }
-        let name = self
-            .path
-            .as_ref()
-            .map_or("[new file]".into(), |p| p.display().to_string());
-        let dirty = if self.history.is_dirty() { " [+]" } else { "" };
-        let info = match &self.message {
-            Some(message) => message.as_str(),
-            None if self.confirm => CONFIRM,
-            None => HINT,
+        let c = &self.config.colors;
+        let accent = Style::new().fg(c.keyword).add_modifier(Modifier::BOLD);
+        let dim = Style::new().fg(c.line_number);
+        let (left, right) = if let Some((kind, input)) = &self.prompt {
+            let left = vec![
+                Span::raw(" "),
+                Span::styled(kind.label(), accent),
+                Span::raw(input.clone()),
+            ];
+            (left, "Enter ok · Esc cancel ".to_owned())
+        } else {
+            let name = self
+                .path
+                .as_ref()
+                .map_or("new file".into(), |p| p.display().to_string());
+            let mut left = vec![
+                Span::raw(" "),
+                Span::styled(name, Style::new().add_modifier(Modifier::BOLD)),
+            ];
+            if self.history.is_dirty() {
+                left.push(Span::styled(" ●", Style::new().fg(c.current_line_number)));
+            }
+            if let Some(message) = &self.message {
+                left.push(Span::raw(format!("   {message}")));
+            } else if self.confirm {
+                left.push(Span::styled(format!("   {CONFIRM}"), accent));
+            }
+            let lang = self
+                .highlighter
+                .as_ref()
+                .map_or(String::new(), |h| format!("{}  ", h.name()));
+            let right = format!(
+                "{lang}{}:{}   F1 help ",
+                self.cursor.line + 1,
+                self.cursor.col + 1
+            );
+            (left, right)
         };
-        let left = format!(" {name}{dirty}   {info}");
-        let lang = self.highlighter.as_ref().map_or("", |h| h.name());
-        let right = format!(
-            "{lang}  Ln {}, Col {} ",
-            self.cursor.line + 1,
-            self.cursor.col + 1
-        );
-        let pad = (area.width as usize).saturating_sub(left.width() + right.width());
-        let text = format!("{left}{}{right}", " ".repeat(pad));
-        frame.render_widget(Paragraph::new(text).style(style), area);
+        let used: usize = left.iter().map(|s| s.content.width()).sum();
+        let pad = (area.width as usize).saturating_sub(used + right.width());
+        let mut spans = left;
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(right, dim));
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn kind_style(&self, kind: Kind) -> Style {
@@ -1011,7 +1064,39 @@ fn expand_home(path: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::find_in;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use super::*;
+
+    fn screen(editor: &mut Editor, terminal: &mut Terminal<TestBackend>) -> String {
+        terminal.draw(|frame| editor.draw(frame)).unwrap();
+        let buf = terminal.backend().buffer();
+        buf.content
+            .chunks(buf.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn draws_status_bar_and_help_panel() {
+        let mut editor = Editor::open(None, Config::default(), None).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(72, 24)).unwrap();
+        editor.insert_text("fn main() {}", false);
+        let text = screen(&mut editor, &mut terminal);
+        println!("{text}");
+        assert!(text.contains("new file ●"));
+        assert!(text.contains("1:13   F1 help"));
+
+        editor.on_key(KeyEvent::from(KeyCode::F(1)));
+        let text = screen(&mut editor, &mut terminal);
+        println!("{text}");
+        assert!(text.contains("Shortcuts"));
+        assert!(text.contains("Ctrl+S"));
+
+        editor.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(!screen(&mut editor, &mut terminal).contains("Shortcuts"));
+    }
 
     #[test]
     fn finds_case_insensitively() {

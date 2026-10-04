@@ -4,6 +4,7 @@ mod buffer;
 mod clipboard;
 mod config;
 mod editor;
+mod help;
 mod highlight;
 mod history;
 
@@ -29,7 +30,7 @@ Options:
   -V, --version  Show the version
 
 Settings are read from ~/.config/ink/config.toml.
-Inside the editor, the status bar shows the main shortcuts.";
+Inside the editor, press F1 to see all the shortcuts.";
 
 fn main() -> Result<()> {
     let arg = std::env::args_os().nth(1);

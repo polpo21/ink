@@ -26,6 +26,8 @@ ink              # start with an empty buffer
 ink --help       # usage
 ```
 
+Press **F1** inside ink to see every shortcut. The status bar stays quiet: file name, a dot when there are unsaved changes, and on the right the language, line:column and the F1 reminder.
+
 ### Files
 
 | Key | Action |
@@ -68,6 +70,12 @@ ink --help       # usage
 | Ctrl+F | Find (case-insensitive unless you type an uppercase letter) |
 | F3 | Find next |
 | Ctrl+H | Replace: for each match, `y` replaces, `n` skips, `a` replaces every match in the file, `Esc` stops |
+
+### Help
+
+| Key | Action |
+|---|---|
+| F1 | Show or hide the shortcuts panel (arrows or wheel to scroll) |
 
 Replacing everything is a single undo step.
 

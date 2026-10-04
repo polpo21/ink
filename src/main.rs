@@ -3,6 +3,7 @@
 mod buffer;
 mod clipboard;
 mod editor;
+mod highlight;
 mod history;
 
 use std::{io::stdout, path::PathBuf};

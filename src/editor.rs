@@ -17,17 +17,22 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     buffer::{Buffer, Pos, byte_idx},
     clipboard::Clipboard,
+    highlight::{self, Highlighter, Kind},
     history::History,
 };
 
 const TAB_WIDTH: usize = 4;
 const SCROLL_LINES: usize = 3;
-const HINT: &str = "Ctrl+S save · Ctrl+Q quit · Ctrl+F find";
+const HINT: &str = "Ctrl+S save · Ctrl+Q quit · Ctrl+F find · Ctrl+H replace";
+const CONFIRM: &str = "Replace? y = yes · n = skip · a = all · Esc = stop";
 
 #[derive(Clone, Copy)]
 enum PromptKind {
     SaveAs,
     Find,
+    GoTo,
+    Replace,
+    ReplaceWith,
 }
 
 impl PromptKind {
@@ -35,6 +40,9 @@ impl PromptKind {
         match self {
             Self::SaveAs => "Save as: ",
             Self::Find => "Find: ",
+            Self::GoTo => "Go to line: ",
+            Self::Replace => "Replace: ",
+            Self::ReplaceWith => "Replace with: ",
         }
     }
 }
@@ -43,6 +51,7 @@ pub struct Editor {
     path: Option<PathBuf>,
     buf: Buffer,
     history: History,
+    highlighter: Option<Highlighter>,
     clipboard: Clipboard,
     /// Set when a whole line was copied with nothing selected: pasting it
     /// inserts it above the cursor line instead of at the cursor.
@@ -61,6 +70,9 @@ pub struct Editor {
     text_area: Rect,
     prompt: Option<(PromptKind, String)>,
     search: String,
+    replacement: String,
+    /// Asking whether to replace the selected match.
+    confirm: bool,
     message: Option<String>,
     quit_armed: bool,
     quit: bool,
@@ -76,10 +88,12 @@ impl Editor {
             },
             None => Buffer::new(),
         };
+        let highlighter = detect(path.as_ref(), &buf);
         Ok(Self {
             path,
             buf,
             history: History::new(),
+            highlighter,
             clipboard: Clipboard::default(),
             line_clip: None,
             cursor: Pos::default(),
@@ -91,6 +105,8 @@ impl Editor {
             text_area: Rect::default(),
             prompt: None,
             search: String::new(),
+            replacement: String::new(),
+            confirm: false,
             message: None,
             quit_armed: false,
             quit: false,
@@ -116,6 +132,9 @@ impl Editor {
         if self.prompt.is_some() {
             return self.on_prompt_key(key);
         }
+        if self.confirm {
+            return self.on_confirm_key(key);
+        }
         self.message = None;
         self.follow = true;
         let quit_armed = std::mem::take(&mut self.quit_armed);
@@ -136,6 +155,8 @@ impl Editor {
                 'y' => self.redo(),
                 'a' => self.select_all(),
                 'f' => self.open_prompt(PromptKind::Find),
+                'h' => self.open_prompt(PromptKind::Replace),
+                'g' => self.open_prompt(PromptKind::GoTo),
                 _ => {}
             }
             return;
@@ -154,10 +175,14 @@ impl Editor {
             KeyCode::Char(c) => self.insert_text(c.encode_utf8(&mut [0; 4]), true),
             KeyCode::Enter => self.newline(),
             KeyCode::Tab => self.insert_text("\t", false),
+            KeyCode::Backspace if ctrl => self.delete_word(false),
+            KeyCode::Delete if ctrl => self.delete_word(true),
             KeyCode::Backspace => self.backspace(),
             KeyCode::Delete => self.delete_forward(),
             KeyCode::Esc => self.anchor = None,
-            KeyCode::F(3) => self.find_next(),
+            KeyCode::F(3) => {
+                self.find_next();
+            }
             _ => {}
         }
     }
@@ -174,19 +199,49 @@ impl Editor {
                 match kind {
                     PromptKind::SaveAs if !input.is_empty() => {
                         self.path = Some(expand_home(&input));
+                        self.highlighter = detect(self.path.as_ref(), &self.buf);
                         self.save();
                     }
-                    PromptKind::SaveAs => {}
-                    PromptKind::Find => {
+                    PromptKind::Find if !input.is_empty() => {
                         self.search = input;
                         self.find_next();
                     }
+                    PromptKind::GoTo => self.go_to(&input),
+                    PromptKind::Replace if !input.is_empty() => {
+                        self.search = input;
+                        self.open_prompt(PromptKind::ReplaceWith);
+                    }
+                    PromptKind::ReplaceWith => {
+                        self.replacement = input;
+                        self.confirm = self.find_next();
+                    }
+                    PromptKind::SaveAs | PromptKind::Find | PromptKind::Replace => {}
                 }
             }
             KeyCode::Backspace => {
                 input.pop();
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => input.push(c),
+            _ => {}
+        }
+    }
+
+    fn on_confirm_key(&mut self, key: KeyEvent) {
+        self.message = None;
+        match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                self.replace_selection();
+                self.confirm = self.find_next();
+            }
+            KeyCode::Char('n' | 'N') => self.confirm = self.find_next(),
+            KeyCode::Char('a' | 'A') => {
+                self.confirm = false;
+                self.replace_all();
+            }
+            KeyCode::Esc | KeyCode::Char('q' | 'Q') => {
+                self.confirm = false;
+                self.anchor = None;
+            }
             _ => {}
         }
     }
@@ -353,10 +408,19 @@ impl Editor {
     // ---- Editing ----
 
     fn insert_text(&mut self, text: &str, merge: bool) {
-        self.delete_selection();
+        // Replacing a selection is one undo step.
+        let grouped = self.selection().is_some();
+        if grouped {
+            self.history.begin_group();
+            self.delete_selection();
+        }
+        self.anchor = None;
         let at = self.cursor;
         let end = self.history.insert(&mut self.buf, at, text, at, merge);
         self.set_cursor(end);
+        if grouped {
+            self.history.end_group();
+        }
     }
 
     fn delete_range(&mut self, start: Pos, end: Pos, merge: bool) {
@@ -415,6 +479,21 @@ impl Editor {
             return;
         };
         self.delete_range(self.cursor, end, true);
+    }
+
+    /// Ctrl+Backspace / Ctrl+Delete: delete the word before or after the cursor.
+    fn delete_word(&mut self, forward: bool) {
+        if self.delete_selection() {
+            return;
+        }
+        let (start, end) = if forward {
+            (self.cursor, self.word_right())
+        } else {
+            (self.word_left(), self.cursor)
+        };
+        if start != end {
+            self.delete_range(start, end, false);
+        }
     }
 
     fn copy(&mut self) {
@@ -512,50 +591,129 @@ impl Editor {
 
     fn open_prompt(&mut self, kind: PromptKind) {
         let input = match kind {
-            PromptKind::Find => self.search.clone(),
-            PromptKind::SaveAs => String::new(),
+            PromptKind::Find | PromptKind::Replace => self.search.clone(),
+            PromptKind::ReplaceWith => self.replacement.clone(),
+            PromptKind::SaveAs | PromptKind::GoTo => String::new(),
         };
         self.prompt = Some((kind, input));
     }
 
-    /// Selects the next match of the search, wrapping around the end.
-    /// Case-insensitive unless the search contains uppercase letters.
-    fn find_next(&mut self) {
-        if self.search.is_empty() {
+    /// Ctrl+G: `42` goes to line 42, `42:7` to column 7 of it.
+    fn go_to(&mut self, input: &str) {
+        let mut parts = input.trim().splitn(2, ':');
+        let Some(line) = parts.next().and_then(|l| l.trim().parse::<usize>().ok()) else {
+            self.message = Some(format!("Not a line number: {input}"));
             return;
-        }
+        };
+        let line = line.clamp(1, self.buf.len_lines()) - 1;
+        let col = parts
+            .next()
+            .and_then(|c| c.trim().parse::<usize>().ok())
+            .unwrap_or(1);
+        self.anchor = None;
+        self.set_cursor(Pos::new(
+            line,
+            (col.max(1) - 1).min(self.buf.line_len(line)),
+        ));
+        // Show the line in the middle of the screen.
+        self.scroll = line.saturating_sub(self.text_area.height as usize / 2);
+        self.follow = true;
+    }
+
+    /// The search as it should be matched: searches are case-insensitive
+    /// (and the needle lowercased) unless they contain an uppercase letter.
+    fn needle(&self) -> (String, bool) {
         let insensitive = !self.search.chars().any(char::is_uppercase);
         let needle = if insensitive {
             self.search.to_lowercase()
         } else {
             self.search.clone()
         };
+        (needle, insensitive)
+    }
+
+    /// Selects the next match after the cursor, wrapping around the end.
+    fn find_next(&mut self) -> bool {
+        if self.search.is_empty() {
+            return false;
+        }
+        let (needle, insensitive) = self.needle();
         let from = self.selection().map_or(self.cursor, |(_, end)| end);
         let n = self.buf.len_lines();
         for i in 0..=n {
             let li = (from.line + i) % n;
             let line = self.buf.line(li);
             let start = if i == 0 { byte_idx(line, from.col) } else { 0 };
-            let found = if insensitive && line.is_ascii() {
-                line[start..].to_ascii_lowercase().find(&needle)
-            } else if insensitive {
-                // Lowercasing can change byte lengths outside ASCII: compare char by char.
-                find_insensitive(&line[start..], &needle)
-            } else {
-                line[start..].find(&needle)
-            };
-            if let Some(b) = found {
-                let col = line[..start + b].chars().count();
+            if let Some((a, b)) = find_in(&line[start..], &needle, insensitive) {
+                let col = line[..start + a].chars().count();
+                let end = line[..start + b].chars().count();
                 self.anchor = Some(Pos::new(li, col));
-                self.set_cursor(Pos::new(li, col + needle.chars().count()));
+                self.set_cursor(Pos::new(li, end));
                 self.follow = true;
                 if li < from.line || i == n {
                     self.message = Some("Search wrapped to the top".into());
                 }
-                return;
+                return true;
             }
         }
+        self.anchor = None;
         self.message = Some(format!("Not found: {}", self.search));
+        false
+    }
+
+    fn replace_selection(&mut self) {
+        let Some((start, end)) = self.selection() else {
+            return;
+        };
+        self.history.begin_group();
+        self.delete_range(start, end, false);
+        if !self.replacement.is_empty() {
+            let end = self
+                .history
+                .insert(&mut self.buf, start, &self.replacement, start, false);
+            self.set_cursor(end);
+        }
+        self.history.end_group();
+        self.history.seal();
+        self.anchor = None;
+    }
+
+    /// Replaces every match in the file, as a single undo step.
+    fn replace_all(&mut self) {
+        let (needle, insensitive) = self.needle();
+        let mut matches = Vec::new();
+        for li in 0..self.buf.len_lines() {
+            let line = self.buf.line(li);
+            let mut from = 0;
+            while let Some((a, b)) = find_in(&line[from..], &needle, insensitive) {
+                let start = Pos::new(li, line[..from + a].chars().count());
+                let end = Pos::new(li, line[..from + b].chars().count());
+                matches.push((start, end));
+                from += b;
+            }
+        }
+        if matches.is_empty() {
+            self.message = Some(format!("Not found: {}", self.search));
+            return;
+        }
+        let cursor = self.cursor;
+        self.history.begin_group();
+        // Back to front, so earlier positions stay valid.
+        for &(start, end) in matches.iter().rev() {
+            self.history
+                .delete(&mut self.buf, start, end, cursor, false);
+            if !self.replacement.is_empty() {
+                self.history
+                    .insert(&mut self.buf, start, &self.replacement, cursor, false);
+            }
+        }
+        self.history.end_group();
+        self.history.seal();
+        self.anchor = None;
+        let line = cursor.line;
+        self.set_cursor(Pos::new(line, cursor.col.min(self.buf.line_len(line))));
+        let s = if matches.len() == 1 { "" } else { "s" };
+        self.message = Some(format!("Replaced {} occurrence{s}", matches.len()));
     }
 
     // ---- Drawing ----
@@ -584,6 +742,11 @@ impl Editor {
             }
         }
 
+        if let Some(line) = self.buf.take_changed_from()
+            && let Some(h) = &mut self.highlighter
+        {
+            h.invalidate(line);
+        }
         let visible = self.scroll..(self.scroll + height).min(n);
         let numbers: Vec<Line> = visible
             .clone()
@@ -603,7 +766,13 @@ impl Editor {
 
         let selection = self.selection();
         let lines: Vec<Line> = visible
-            .map(|i| self.render_line(i, selection, width))
+            .map(|i| {
+                let kinds = match &mut self.highlighter {
+                    Some(h) => h.line(&self.buf, i),
+                    None => Vec::new(),
+                };
+                self.render_line(i, &kinds, selection, width)
+            })
             .collect();
         frame.render_widget(Paragraph::new(lines), text_area);
 
@@ -622,14 +791,20 @@ impl Editor {
         }
     }
 
-    fn render_line(&self, i: usize, selection: Option<(Pos, Pos)>, width: usize) -> Line<'static> {
+    fn render_line(
+        &self,
+        i: usize,
+        kinds: &[Kind],
+        selection: Option<(Pos, Pos)>,
+        width: usize,
+    ) -> Line<'static> {
         let selected_style = Style::new().add_modifier(Modifier::REVERSED);
         let is_selected = |col| selection.is_some_and(|(s, e)| (s..e).contains(&Pos::new(i, col)));
         let (start, stop) = (self.hscroll, self.hscroll + width);
 
         let mut spans = Vec::new();
         let mut run = String::new();
-        let mut run_selected = false;
+        let mut run_style = Style::new();
         let mut dcol = 0;
         for (col, ch) in self.buf.line(i).chars().enumerate() {
             let cells = char_width(ch, dcol);
@@ -640,15 +815,14 @@ impl Editor {
             if dcol >= stop {
                 break;
             }
-            let selected = is_selected(col);
-            if selected != run_selected && !run.is_empty() {
-                spans.push(styled(
-                    std::mem::take(&mut run),
-                    run_selected,
-                    selected_style,
-                ));
+            let mut style = kind_style(kinds.get(col).copied().unwrap_or(Kind::Text));
+            if is_selected(col) {
+                style = style.patch(selected_style);
             }
-            run_selected = selected;
+            if style != run_style && !run.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut run), run_style));
+            }
+            run_style = style;
             if ch == '\t' || dcol < start || dcol + cells > stop {
                 // Tabs, and wide characters cut by the edge, become spaces.
                 let visible = (dcol + cells).min(stop) - dcol.max(start);
@@ -661,7 +835,7 @@ impl Editor {
             dcol += cells;
         }
         if !run.is_empty() {
-            spans.push(styled(run, run_selected, selected_style));
+            spans.push(Span::styled(run, run_style));
         }
         // Show the selected line break as a highlighted space.
         if is_selected(self.buf.line_len(i)) && (start..stop).contains(&dcol) {
@@ -682,11 +856,18 @@ impl Editor {
             .as_ref()
             .map_or("[new file]".into(), |p| p.display().to_string());
         let dirty = if self.history.is_dirty() { " [+]" } else { "" };
-        let left = format!(
-            " {name}{dirty}   {}",
-            self.message.as_deref().unwrap_or(HINT)
+        let info = match &self.message {
+            Some(message) => message.as_str(),
+            None if self.confirm => CONFIRM,
+            None => HINT,
+        };
+        let left = format!(" {name}{dirty}   {info}");
+        let lang = self.highlighter.as_ref().map_or("", |h| h.name());
+        let right = format!(
+            "{lang}  Ln {}, Col {} ",
+            self.cursor.line + 1,
+            self.cursor.col + 1
         );
-        let right = format!("Ln {}, Col {} ", self.cursor.line + 1, self.cursor.col + 1);
         let pad = (area.width as usize).saturating_sub(left.width() + right.width());
         let text = format!("{left}{}{right}", " ".repeat(pad));
         frame.render_widget(Paragraph::new(text).style(style), area);
@@ -734,12 +915,22 @@ fn char_width(ch: char, dcol: usize) -> usize {
     }
 }
 
-fn styled(text: String, selected: bool, style: Style) -> Span<'static> {
-    if selected {
-        Span::styled(text, style)
-    } else {
-        Span::raw(text)
+fn kind_style(kind: Kind) -> Style {
+    let style = Style::new();
+    match kind {
+        Kind::Text => style,
+        Kind::Comment => style.fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Kind::String => style.fg(Color::Green),
+        Kind::Number | Kind::Constant => style.fg(Color::Cyan),
+        Kind::Keyword => style.fg(Color::Magenta),
+        Kind::Type => style.fg(Color::Yellow),
+        Kind::Function => style.fg(Color::Blue),
+        Kind::Heading => style.fg(Color::Blue).add_modifier(Modifier::BOLD),
     }
+}
+
+fn detect(path: Option<&PathBuf>, buf: &Buffer) -> Option<Highlighter> {
+    highlight::detect(path?, buf.line(0)).map(Highlighter::new)
 }
 
 fn is_word(c: char) -> bool {
@@ -751,12 +942,32 @@ fn normalize(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// Case-insensitive search for an already lowercase `needle`; returns a byte offset.
-fn find_insensitive(hay: &str, needle: &str) -> Option<usize> {
-    let needle: Vec<char> = needle.chars().collect();
-    hay.char_indices().map(|(i, _)| i).find(|&i| {
-        let mut chars = hay[i..].chars().flat_map(char::to_lowercase);
-        needle.iter().all(|n| chars.next() == Some(*n))
+/// Finds `needle` in `hay` and returns its byte range in `hay`.
+/// When `insensitive`, `needle` must already be lowercase.
+fn find_in(hay: &str, needle: &str, insensitive: bool) -> Option<(usize, usize)> {
+    if !insensitive {
+        return hay.find(needle).map(|a| (a, a + needle.len()));
+    }
+    if hay.is_ascii() {
+        return hay
+            .to_ascii_lowercase()
+            .find(needle)
+            .map(|a| (a, a + needle.len()));
+    }
+    // Lowercasing can change byte lengths outside ASCII: compare char by char.
+    hay.char_indices().find_map(|(a, _)| {
+        let mut rest = hay[a..]
+            .char_indices()
+            .flat_map(|(i, c)| c.to_lowercase().map(move |l| (a + i + c.len_utf8(), l)));
+        let mut end = a;
+        for n in needle.chars() {
+            let (e, l) = rest.next()?;
+            if l != n {
+                return None;
+            }
+            end = e;
+        }
+        Some((a, end))
     })
 }
 
@@ -764,5 +975,17 @@ fn expand_home(path: &str) -> PathBuf {
     match (path.strip_prefix("~/"), env::var_os("HOME")) {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => PathBuf::from(path),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_in;
+
+    #[test]
+    fn finds_case_insensitively() {
+        assert_eq!(find_in("Hello World", "world", true), Some((6, 11)));
+        assert_eq!(find_in("Hello World", "world", false), None);
+        assert_eq!(find_in("Caffè ÈCCO", "èc", true), Some((7, 10)));
     }
 }

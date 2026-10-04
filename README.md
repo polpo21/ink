@@ -4,7 +4,7 @@ A fast, minimal terminal text editor, written in Rust.
 
 ink aims to be what [micro](https://micro-editor.github.io/) is (an editor you can use right away, with the shortcuts you already know: Ctrl+C, Ctrl+V, Ctrl+Z, Ctrl+S) while staying small and quick: a single native binary with near-instant startup.
 
-> **Status: early development.** The basics work (editing, selection, clipboard, undo, search, save), but ink is young: keep backups of anything important.
+> **Status: early development.** The basics work (editing, selection, clipboard, undo, search and replace, syntax highlighting), but ink is young: keep backups of anything important.
 
 ## Installation
 
@@ -42,6 +42,7 @@ ink              # start with an empty buffer
 | Ctrl+Z | Undo (word by word while typing) |
 | Ctrl+Y / Ctrl+Shift+Z | Redo |
 | Ctrl+A | Select all |
+| Ctrl+Backspace / Ctrl+Delete | Delete the word before / after the cursor |
 | Enter | New line, keeping the indentation |
 | Tab | Insert a tab |
 
@@ -54,16 +55,26 @@ ink              # start with an empty buffer
 | Home / End | Start (indentation first) / end of line |
 | Ctrl+Home / Ctrl+End | Start / end of file |
 | Page Up / Page Down | Move by one screen |
+| Ctrl+G | Go to line (`42`, or `42:7` for a column too) |
 | Shift + any move | Extend the selection |
 | Mouse | Click to place the cursor, drag to select, wheel to scroll |
 | Esc | Clear the selection |
 
-### Search
+### Search and replace
 
 | Key | Action |
 |---|---|
 | Ctrl+F | Find (case-insensitive unless you type an uppercase letter) |
 | F3 | Find next |
+| Ctrl+H | Replace: for each match, `y` replaces, `n` skips, `a` replaces every match in the file, `Esc` stops |
+
+Replacing everything is a single undo step.
+
+### Syntax highlighting
+
+Picked from the file name, or from the `#!` line for scripts: Rust, Python, JavaScript/TypeScript, C/C++, Go, Shell, Fish, Lua, SQL, CSS, TOML, YAML, JSON, KDL, INI-style config files and Markdown.
+
+Colours come from your terminal's 16-colour palette, so ink follows whatever theme the terminal uses. The highlighter is built in and only re-scans the lines that changed, keeping startup instant.
 
 The clipboard is the system one: `wl-copy`/`wl-paste` on Wayland, `xclip` on X11. Without them ink uses its own internal clipboard. Files keep their line endings (LF or CRLF) and are written in place, so symlinks stay symlinks.
 
@@ -76,9 +87,9 @@ The clipboard is the system one: `wl-copy`/`wl-paste` on Wayland, `xclip` on X11
 - [x] Undo and redo
 - [x] Search
 - [x] Mouse support
-- [ ] Replace
-- [ ] Go to line
-- [ ] Syntax highlighting
+- [x] Replace
+- [x] Go to line
+- [x] Syntax highlighting
 - [ ] Configuration file
 
 ## Building from source

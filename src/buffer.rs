@@ -17,6 +17,8 @@ pub struct Buffer {
     lines: Vec<String>,
     trailing_newline: bool,
     crlf: bool,
+    /// First line changed since the last `take_changed_from`.
+    changed_from: Option<usize>,
 }
 
 impl Buffer {
@@ -26,6 +28,7 @@ impl Buffer {
             lines: vec![String::new()],
             trailing_newline: true,
             crlf: false,
+            changed_from: None,
         }
     }
 
@@ -38,6 +41,7 @@ impl Buffer {
             lines,
             trailing_newline: text.ends_with('\n'),
             crlf: text.contains("\r\n"),
+            changed_from: None,
         }
     }
 
@@ -88,6 +92,7 @@ impl Buffer {
 
     /// Inserts `text` (which may contain `\n`) at `at` and returns the position after it.
     pub fn insert(&mut self, at: Pos, text: &str) -> Pos {
+        self.mark_changed(at.line);
         let line = &mut self.lines[at.line];
         let tail = line.split_off(byte_idx(line, at.col));
         let mut parts = text.split('\n');
@@ -110,6 +115,7 @@ impl Buffer {
 
     /// Removes the text between `start` and `end` (`start <= end`) and returns it.
     pub fn delete(&mut self, start: Pos, end: Pos) -> String {
+        self.mark_changed(start.line);
         let removed = self.text(start, end);
         let last = &self.lines[end.line];
         let tail = last[byte_idx(last, end.col)..].to_owned();
@@ -118,6 +124,15 @@ impl Buffer {
         first.push_str(&tail);
         self.lines.drain(start.line + 1..=end.line);
         removed
+    }
+
+    /// Returns (and resets) the first line changed since the last call.
+    pub fn take_changed_from(&mut self) -> Option<usize> {
+        self.changed_from.take()
+    }
+
+    fn mark_changed(&mut self, line: usize) {
+        self.changed_from = Some(self.changed_from.map_or(line, |l| l.min(line)));
     }
 }
 

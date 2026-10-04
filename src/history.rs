@@ -14,6 +14,8 @@ struct Edit {
     text: String,
     /// Where the cursor was before the edit, restored on undo.
     cursor: Pos,
+    /// Edits with the same group are undone and redone together.
+    group: u64,
 }
 
 /// Every change to the buffer goes through here. Consecutive typing and
@@ -25,6 +27,8 @@ pub struct History {
     sealed: bool,
     /// Length of the undo stack when the file was last saved.
     saved: Option<usize>,
+    last_group: u64,
+    open_group: Option<u64>,
 }
 
 impl History {
@@ -34,6 +38,8 @@ impl History {
             redo: Vec::new(),
             sealed: false,
             saved: Some(0),
+            last_group: 0,
+            open_group: None,
         }
     }
 
@@ -61,6 +67,7 @@ impl History {
             start: at,
             text: text.to_owned(),
             cursor,
+            group: 0,
         });
         end
     }
@@ -88,39 +95,64 @@ impl History {
             start,
             text,
             cursor,
+            group: 0,
         });
     }
 
-    /// Reverts the last edit and returns where the cursor should go.
-    pub fn undo(&mut self, buf: &mut Buffer) -> Option<Pos> {
-        let edit = self.undo.pop()?;
-        match edit.kind {
-            Kind::Insert => {
-                buf.delete(edit.start, end_pos(edit.start, &edit.text));
-            }
-            Kind::Delete => {
-                buf.insert(edit.start, &edit.text);
-            }
-        }
-        let cursor = edit.cursor;
-        self.redo.push(edit);
+    /// Starts a group: the edits until `end_group` count as one undo step.
+    pub fn begin_group(&mut self) {
+        self.last_group += 1;
+        self.open_group = Some(self.last_group);
         self.sealed = true;
-        Some(cursor)
     }
 
-    /// Re-applies the last undone edit and returns where the cursor should go.
-    pub fn redo(&mut self, buf: &mut Buffer) -> Option<Pos> {
-        let edit = self.redo.pop()?;
-        let cursor = match edit.kind {
-            Kind::Insert => buf.insert(edit.start, &edit.text),
-            Kind::Delete => {
-                buf.delete(edit.start, end_pos(edit.start, &edit.text));
-                edit.start
-            }
-        };
-        self.undo.push(edit);
+    /// Ends the group. Typing right after still merges into it, so replacing a
+    /// selection by typing a word is undone in one step.
+    pub fn end_group(&mut self) {
+        self.open_group = None;
+    }
+
+    /// Makes the next edit start a new undo step.
+    pub fn seal(&mut self) {
         self.sealed = true;
-        Some(cursor)
+    }
+
+    /// Reverts the last undo step and returns where the cursor should go.
+    pub fn undo(&mut self, buf: &mut Buffer) -> Option<Pos> {
+        let group = self.undo.last()?.group;
+        let mut cursor = None;
+        while let Some(edit) = self.undo.pop_if(|e| e.group == group) {
+            match edit.kind {
+                Kind::Insert => {
+                    buf.delete(edit.start, end_pos(edit.start, &edit.text));
+                }
+                Kind::Delete => {
+                    buf.insert(edit.start, &edit.text);
+                }
+            }
+            cursor = Some(edit.cursor);
+            self.redo.push(edit);
+        }
+        self.sealed = true;
+        cursor
+    }
+
+    /// Re-applies the last undone step and returns where the cursor should go.
+    pub fn redo(&mut self, buf: &mut Buffer) -> Option<Pos> {
+        let group = self.redo.last()?.group;
+        let mut cursor = None;
+        while let Some(edit) = self.redo.pop_if(|e| e.group == group) {
+            cursor = Some(match edit.kind {
+                Kind::Insert => buf.insert(edit.start, &edit.text),
+                Kind::Delete => {
+                    buf.delete(edit.start, end_pos(edit.start, &edit.text));
+                    edit.start
+                }
+            });
+            self.undo.push(edit);
+        }
+        self.sealed = true;
+        cursor
     }
 
     pub fn mark_saved(&mut self) {
@@ -136,7 +168,11 @@ impl History {
         !self.sealed && self.undo.last().is_some_and(|e| e.kind == kind)
     }
 
-    fn push(&mut self, edit: Edit) {
+    fn push(&mut self, mut edit: Edit) {
+        edit.group = self.open_group.unwrap_or_else(|| {
+            self.last_group += 1;
+            self.last_group
+        });
         // Branching off after undoing past the save point: it can't be reached again.
         if self.saved.is_some_and(|s| self.undo.len() < s) {
             self.saved = None;
@@ -200,5 +236,34 @@ mod tests {
         h.undo(&mut buf);
         type_str(&mut h, &mut buf, Pos::new(0, 0), "c");
         assert!(h.is_dirty());
+    }
+
+    #[test]
+    fn undoes_a_group_in_one_step() {
+        let mut buf = Buffer::from_text("one two");
+        let mut h = History::new();
+        h.begin_group();
+        h.delete(
+            &mut buf,
+            Pos::new(0, 4),
+            Pos::new(0, 7),
+            Pos::new(0, 7),
+            false,
+        );
+        h.insert(&mut buf, Pos::new(0, 4), "2", Pos::new(0, 7), false);
+        h.delete(
+            &mut buf,
+            Pos::new(0, 0),
+            Pos::new(0, 3),
+            Pos::new(0, 7),
+            false,
+        );
+        h.insert(&mut buf, Pos::new(0, 0), "1", Pos::new(0, 7), false);
+        h.end_group();
+        assert_eq!(buf.line(0), "1 2");
+        assert_eq!(h.undo(&mut buf), Some(Pos::new(0, 7)));
+        assert_eq!(buf.line(0), "one two");
+        h.redo(&mut buf);
+        assert_eq!(buf.line(0), "1 2");
     }
 }

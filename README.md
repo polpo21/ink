@@ -23,6 +23,7 @@ This builds an optimised binary and places it in `~/.cargo/bin/ink`.
 ```bash
 ink notes.txt    # open a file (it is created when you save, if it doesn't exist)
 ink              # start with an empty buffer
+ink --help       # usage
 ```
 
 ### Files
@@ -78,6 +79,28 @@ Colours come from your terminal's 16-colour palette, so ink follows whatever the
 
 The clipboard is the system one: `wl-copy`/`wl-paste` on Wayland, `xclip` on X11. Without them ink uses its own internal clipboard. Files keep their line endings (LF or CRLF) and are written in place, so symlinks stay symlinks.
 
+## Configuration
+
+ink reads `~/.config/ink/config.toml` (or `$XDG_CONFIG_HOME/ink/config.toml`). Every setting is optional, and without the file ink uses the defaults. A mistake in the file never stops ink from opening: it falls back to the defaults and shows the error in the status bar.
+
+```toml
+tab_width = 4          # columns a tab takes on screen
+tabs_to_spaces = false # Tab inserts spaces instead of a tab character
+auto_indent = true     # Enter keeps the current indentation
+line_numbers = true
+mouse = true           # false = use the terminal's own text selection
+scroll_lines = 3       # lines per mouse wheel step
+
+[colors]               # names follow the terminal theme; "#rrggbb" is fixed
+keyword = "magenta"
+comment = "darkgray"
+
+[languages.python]     # per-language overrides
+tabs_to_spaces = true
+```
+
+[`config.example.toml`](config.example.toml) lists every setting with its default.
+
 ## Roadmap
 
 - [x] Open a file and move around it
@@ -90,7 +113,7 @@ The clipboard is the system one: `wl-copy`/`wl-paste` on Wayland, `xclip` on X11
 - [x] Replace
 - [x] Go to line
 - [x] Syntax highlighting
-- [ ] Configuration file
+- [x] Configuration file
 
 ## Building from source
 

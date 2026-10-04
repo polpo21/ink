@@ -1,0 +1,41 @@
+# ink configuration: copy to ~/.config/ink/config.toml
+# Every setting is optional; the values below are the defaults.
+
+# Columns a tab takes on screen.
+tab_width = 4
+# Insert spaces instead of a tab character when pressing Tab.
+tabs_to_spaces = false
+# Keep the indentation of the current line when pressing Enter.
+auto_indent = true
+line_numbers = true
+# Capture the mouse (click, drag, wheel). Set to false to use the
+# terminal's own text selection instead.
+mouse = true
+# Lines moved by one step of the mouse wheel.
+scroll_lines = 3
+
+# Colours: a name (black, red, green, yellow, blue, magenta, cyan, gray,
+# darkgray, lightred, lightgreen, lightyellow, lightblue, lightmagenta,
+# lightcyan, white), a palette index ("0" to "255") or "#rrggbb".
+# Names follow your terminal's theme; "#rrggbb" is fixed.
+[colors]
+comment = "darkgray"
+string = "green"
+number = "cyan"
+constant = "cyan"
+keyword = "magenta"
+type = "yellow"
+function = "blue"
+heading = "blue"
+line_number = "darkgray"
+current_line_number = "yellow"
+
+# Per-language overrides, by language name in lowercase: rust, python,
+# javascript, c/c++, go, shell, fish, lua, sql, css, toml, config, yaml,
+# json, kdl, markdown. Names with symbols need quotes: [languages."c/c++"]
+[languages.python]
+tabs_to_spaces = true
+
+[languages.yaml]
+tab_width = 2
+tabs_to_spaces = true

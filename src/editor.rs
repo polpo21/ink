@@ -8,7 +8,7 @@ use ratatui::{
         MouseEventKind,
     },
     layout::{Constraint, Layout, Position, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -17,12 +17,11 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     buffer::{Buffer, Pos, byte_idx},
     clipboard::Clipboard,
+    config::Config,
     highlight::{self, Highlighter, Kind},
     history::History,
 };
 
-const TAB_WIDTH: usize = 4;
-const SCROLL_LINES: usize = 3;
 const HINT: &str = "Ctrl+S save · Ctrl+Q quit · Ctrl+F find · Ctrl+H replace";
 const CONFIRM: &str = "Replace? y = yes · n = skip · a = all · Esc = stop";
 
@@ -52,6 +51,10 @@ pub struct Editor {
     buf: Buffer,
     history: History,
     highlighter: Option<Highlighter>,
+    config: Config,
+    /// Indentation settings for the current language.
+    tab_width: usize,
+    tabs_to_spaces: bool,
     clipboard: Clipboard,
     /// Set when a whole line was copied with nothing selected: pasting it
     /// inserts it above the cursor line instead of at the cursor.
@@ -79,7 +82,7 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn open(path: Option<PathBuf>) -> Result<Self> {
+    pub fn open(path: Option<PathBuf>, config: Config, message: Option<String>) -> Result<Self> {
         let buf = match &path {
             Some(p) => match fs::read_to_string(p) {
                 Ok(text) => Buffer::from_text(&text),
@@ -89,11 +92,15 @@ impl Editor {
             None => Buffer::new(),
         };
         let highlighter = detect(path.as_ref(), &buf);
+        let (tab_width, tabs_to_spaces) = config.indent_for(highlighter.as_ref().map(|h| h.name()));
         Ok(Self {
             path,
             buf,
             history: History::new(),
             highlighter,
+            config,
+            tab_width,
+            tabs_to_spaces,
             clipboard: Clipboard::default(),
             line_clip: None,
             cursor: Pos::default(),
@@ -107,7 +114,7 @@ impl Editor {
             search: String::new(),
             replacement: String::new(),
             confirm: false,
-            message: None,
+            message,
             quit_armed: false,
             quit: false,
         })
@@ -174,7 +181,7 @@ impl Editor {
                 if m.contains(KeyModifiers::ALT) && !m.contains(KeyModifiers::CONTROL) => {}
             KeyCode::Char(c) => self.insert_text(c.encode_utf8(&mut [0; 4]), true),
             KeyCode::Enter => self.newline(),
-            KeyCode::Tab => self.insert_text("\t", false),
+            KeyCode::Tab => self.insert_tab(),
             KeyCode::Backspace if ctrl => self.delete_word(false),
             KeyCode::Delete if ctrl => self.delete_word(true),
             KeyCode::Backspace => self.backspace(),
@@ -200,6 +207,9 @@ impl Editor {
                     PromptKind::SaveAs if !input.is_empty() => {
                         self.path = Some(expand_home(&input));
                         self.highlighter = detect(self.path.as_ref(), &self.buf);
+                        (self.tab_width, self.tabs_to_spaces) = self
+                            .config
+                            .indent_for(self.highlighter.as_ref().map(|h| h.name()));
                         self.save();
                     }
                     PromptKind::Find if !input.is_empty() => {
@@ -267,11 +277,12 @@ impl Editor {
                 self.follow = true;
             }
             MouseEventKind::ScrollUp => {
-                self.scroll = self.scroll.saturating_sub(SCROLL_LINES);
+                self.scroll = self.scroll.saturating_sub(self.config.scroll_lines);
                 self.follow = false;
             }
             MouseEventKind::ScrollDown => {
-                self.scroll = (self.scroll + SCROLL_LINES).min(self.buf.len_lines() - 1);
+                self.scroll =
+                    (self.scroll + self.config.scroll_lines).min(self.buf.len_lines() - 1);
                 self.follow = false;
             }
             _ => {}
@@ -441,14 +452,27 @@ impl Editor {
 
     fn newline(&mut self) {
         // Keep the current line's indentation.
-        let indent: String = self
-            .buf
-            .line(self.cursor.line)
-            .chars()
-            .take(self.cursor.col)
-            .take_while(|c| c.is_whitespace())
-            .collect();
+        let indent: String = if self.config.auto_indent {
+            self.buf
+                .line(self.cursor.line)
+                .chars()
+                .take(self.cursor.col)
+                .take_while(|c| c.is_whitespace())
+                .collect()
+        } else {
+            String::new()
+        };
         self.insert_text(&format!("\n{indent}"), false);
+    }
+
+    fn insert_tab(&mut self) {
+        if self.tabs_to_spaces {
+            // Up to the next tab stop.
+            let n = self.tab_width - self.display_col(self.cursor) % self.tab_width;
+            self.insert_text(&" ".repeat(n), false);
+        } else {
+            self.insert_text("\t", false);
+        }
     }
 
     fn backspace(&mut self) {
@@ -722,7 +746,11 @@ impl Editor {
         let [main, status_area] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
         let n = self.buf.len_lines();
-        let gutter = n.to_string().len().max(3) + 1;
+        let gutter = if self.config.line_numbers {
+            n.to_string().len().max(3) + 1
+        } else {
+            0
+        };
         let [gutter_area, text_area] =
             Layout::horizontal([Constraint::Length(gutter as u16), Constraint::Min(1)]).areas(main);
         self.text_area = text_area;
@@ -751,13 +779,14 @@ impl Editor {
         let numbers: Vec<Line> = visible
             .clone()
             .map(|i| {
+                let colors = &self.config.colors;
                 let color = if i == self.cursor.line {
-                    Color::Yellow
+                    colors.current_line_number
                 } else {
-                    Color::DarkGray
+                    colors.line_number
                 };
                 Line::styled(
-                    format!("{:>w$} ", i + 1, w = gutter - 1),
+                    format!("{:>w$} ", i + 1, w = gutter.saturating_sub(1)),
                     Style::new().fg(color),
                 )
             })
@@ -807,7 +836,7 @@ impl Editor {
         let mut run_style = Style::new();
         let mut dcol = 0;
         for (col, ch) in self.buf.line(i).chars().enumerate() {
-            let cells = char_width(ch, dcol);
+            let cells = char_width(ch, dcol, self.tab_width);
             if dcol + cells <= start {
                 dcol += cells;
                 continue;
@@ -815,7 +844,7 @@ impl Editor {
             if dcol >= stop {
                 break;
             }
-            let mut style = kind_style(kinds.get(col).copied().unwrap_or(Kind::Text));
+            let mut style = self.kind_style(kinds.get(col).copied().unwrap_or(Kind::Text));
             if is_selected(col) {
                 style = style.patch(selected_style);
             }
@@ -873,6 +902,22 @@ impl Editor {
         frame.render_widget(Paragraph::new(text).style(style), area);
     }
 
+    fn kind_style(&self, kind: Kind) -> Style {
+        let c = &self.config.colors;
+        let style = Style::new();
+        match kind {
+            Kind::Text => style,
+            Kind::Comment => style.fg(c.comment).add_modifier(Modifier::ITALIC),
+            Kind::String => style.fg(c.string),
+            Kind::Number => style.fg(c.number),
+            Kind::Constant => style.fg(c.constant),
+            Kind::Keyword => style.fg(c.keyword),
+            Kind::Type => style.fg(c.type_),
+            Kind::Function => style.fg(c.function),
+            Kind::Heading => style.fg(c.heading).add_modifier(Modifier::BOLD),
+        }
+    }
+
     // ---- Columns ----
 
     /// The screen column (tabs and wide characters expanded) of `pos`.
@@ -881,14 +926,14 @@ impl Editor {
             .line(pos.line)
             .chars()
             .take(pos.col)
-            .fold(0, |dcol, ch| dcol + char_width(ch, dcol))
+            .fold(0, |dcol, ch| dcol + char_width(ch, dcol, self.tab_width))
     }
 
     /// The character column on `line` closest to screen column `target`.
     fn col_at(&self, line: usize, target: usize) -> usize {
         let mut dcol = 0;
         for (col, ch) in self.buf.line(line).chars().enumerate() {
-            let cells = char_width(ch, dcol);
+            let cells = char_width(ch, dcol, self.tab_width);
             if dcol + cells > target {
                 return col;
             }
@@ -907,25 +952,11 @@ impl Editor {
     }
 }
 
-fn char_width(ch: char, dcol: usize) -> usize {
+fn char_width(ch: char, dcol: usize, tab_width: usize) -> usize {
     match ch {
-        '\t' => TAB_WIDTH - dcol % TAB_WIDTH,
+        '\t' => tab_width - dcol % tab_width,
         c if c.is_control() => 1,
         c => c.width().unwrap_or(0),
-    }
-}
-
-fn kind_style(kind: Kind) -> Style {
-    let style = Style::new();
-    match kind {
-        Kind::Text => style,
-        Kind::Comment => style.fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-        Kind::String => style.fg(Color::Green),
-        Kind::Number | Kind::Constant => style.fg(Color::Cyan),
-        Kind::Keyword => style.fg(Color::Magenta),
-        Kind::Type => style.fg(Color::Yellow),
-        Kind::Function => style.fg(Color::Blue),
-        Kind::Heading => style.fg(Color::Blue).add_modifier(Modifier::BOLD),
     }
 }
 

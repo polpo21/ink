@@ -1,0 +1,21 @@
+[package]
+name = "ink"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "A fast, minimal terminal text editor, written in Rust"
+repository = "https://github.com/polpo21/ink"
+readme = "README.md"
+keywords = ["editor", "terminal", "tui", "text-editor"]
+categories = ["command-line-utilities", "text-editors"]
+
+[dependencies]
+anyhow = "1"
+ratatui = "0.30"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,33 @@
+# === Cargo / Rust ===
+/target
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
+
+# === IDE / Editor ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.*.kate-swp
+*.sublime-workspace
+*.sublime-project
+
+# === OS junk ===
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+
+# === Environment / secrets ===
+.env
+.env.*
+*.key
+*.pem
+
+# === Logs / temporary files ===
+*.log
+*.tmp
+*.bak
+*.orig
